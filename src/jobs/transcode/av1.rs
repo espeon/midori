@@ -1,11 +1,11 @@
-use std::{path::Path, process::Command};
+use std::process::Command;
 
 use super::{TranscodeSettings, Transcoder};
 
 pub struct SvtAv1;
 
 impl Transcoder for SvtAv1 {
-    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command, res: i64, output_folder: &Path) -> anyhow::Result<()> {
+    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()> {
         
         ff
           .arg("-c:v")
@@ -14,8 +14,7 @@ impl Transcoder for SvtAv1 {
           .arg(settings.crf.to_string())
           .arg("-preset")
           .arg(self.get_preset(settings.preset))
-          .arg("-an")
-          .arg(format!("{}/{}p.mp4", output_folder.to_string_lossy(), res));
+          .arg("-an");
         Ok(())
     }
 
@@ -28,7 +27,7 @@ impl Transcoder for SvtAv1 {
 pub struct Av1Nvenc;
 
 impl Transcoder for Av1Nvenc {
-    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command, res: i64, output_folder: &Path) -> anyhow::Result<()> {
+    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()> {
         ff
           .arg("-c:v")
           .arg("av1_nvenc")

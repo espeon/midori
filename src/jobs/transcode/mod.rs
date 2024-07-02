@@ -2,7 +2,7 @@ mod process;
 mod av1;
 mod avc;
 
-use std::{path::Path, process::Command};
+use std::process::Command;
 
 // re-export from process
 pub use process::*;
@@ -38,6 +38,6 @@ impl Default for TranscodeSettings {
 
 /// Generate transcode settings for ffmpeg
 pub trait Transcoder {
-    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command, res: i64, output_folder: &Path) -> anyhow::Result<()>;
+    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()>;
     fn get_preset(&self, preset: u8) -> String;
 }

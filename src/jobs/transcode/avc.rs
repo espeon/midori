@@ -1,11 +1,11 @@
-use std::{path::Path, process::Command};
+use std::process::Command;
 
 use super::{TranscodeSettings, Transcoder};
 
 pub struct LibX264;
 
 impl Transcoder for LibX264 {
-    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command, res: i64, output_folder: &Path) -> anyhow::Result<()> {
+    fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()> {
         ff
         // convert to h264
         .arg("-c:v")

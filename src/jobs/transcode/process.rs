@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Error};
 use axum::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::{
     jobs::{
@@ -259,7 +259,7 @@ async fn transcode_multiple_res(
                     preset: 5,
                     ..Default::default()
                 };
-                SvtAv1.transcode(&settings, &mut ff, res.height, &output_folder)?;
+                SvtAv1.transcode(&settings, &mut ff)?;
             },
             "avc" => {
                 let settings = TranscodeSettings {
@@ -267,7 +267,7 @@ async fn transcode_multiple_res(
                     preset: 8,
                     ..Default::default()
                 };
-                LibX264.transcode(&settings, &mut ff, res.height, &output_folder)?;
+                LibX264.transcode(&settings, &mut ff)?;
             },
             _ => {
                 anyhow::bail!("unsupported codec");
