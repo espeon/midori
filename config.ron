@@ -1,0 +1,9 @@
+AppConfig (
+    input_folder:"./input"
+    output_folder: "./out"
+    heights:[480, 720, 1080]
+    // segment length is (size * framerate) frames
+    segment_size:2
+    // one of "random", "slug_filename", "filename"
+    name_scheme: "slug_filename"
+)
