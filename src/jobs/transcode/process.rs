@@ -1,6 +1,6 @@
 use std::{
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -49,23 +49,93 @@ impl Job for TranscodeJob {
             .output()?;
         let output: FfProbeStreamsOutput = serde_json::from_slice(&probe.stdout)?;
         let streams = output.streams.context("could not find streams")?;
-        // output fodler is "out/<job_id>"
-        let output_folder = PathBuf::from(format!("out/{}", jctx.id));
-        let _ = tokio::fs::create_dir_all(output_folder.clone()).await;
-        let subs =
-            extract_ass_from_mkv(self.path.clone(), output_folder.join("sub"), &streams).await?;
-        //let mut av = extract_av_from_mkv(self.path.clone(), output_folder.clone(), &streams).await?;
-        let res =
-            transcode_multiple_res(self.path.clone(), output_folder, &streams, jctx, state).await?;
+        // work fodler is "work/<job_id>"
+        let workdir = PathBuf::from(format!("temp/{}", jctx.id));
+        let _ = tokio::fs::create_dir_all(workdir.clone()).await;
+        // extract subtitles
+        let subs = extract_ass_from_mkv(self.path.clone(), workdir.join("sub"), &streams).await?;
+        //let mut av = extract_av_from_mkv(self.path.clone(), workdir.clone(), &streams).await?;
+        let res = transcode_multiple_res(&self.path, &workdir, &streams, &jctx, state)?;
         let renditions = res; //av.append(&mut res);
+
+        // get out dir
+        let out_dir = PathBuf::from(format!("out/{}", jctx.id));
+
+        let _ = tokio::fs::create_dir_all(out_dir.clone()).await;
+        debug!("Segmenting {}", workdir.to_str().unwrap());
+        let _ = fragment_and_segment(workdir, out_dir, &renditions)?;
+
         Ok(json!({"subtitles": subs, "renditions": renditions}))
     }
 }
 
+fn fragment_and_segment(
+    workdir: PathBuf,
+    out_dir: PathBuf,
+    renditions: &[TranscodeEntry],
+) -> Result<Vec<TranscodeEntry>, Error> {
+    let mut ret_renditions: Vec<TranscodeEntry> = Vec::new();
+    // Fragment all renditions
+    for entry in renditions {
+        // mp4fragment "$file" "f_$file"
+        debug!(
+            "fragmenting {}\\{}",
+            workdir
+                .to_str()
+                .context("could not convert path to string?")?,
+            entry.filename
+        );
+        Command::new("mp4fragment")
+            .arg(format!(
+                "{}\\{}",
+                workdir
+                    .to_str()
+                    .context("could not convert path to string?")?,
+                entry.filename
+            ))
+            .arg(format!(
+                "{}\\f_{}",
+                workdir.to_str().unwrap(),
+                entry.filename
+            ))
+            .output()?;
+        ret_renditions.push(TranscodeEntry {
+            filename: format!("f_{}", entry.filename),
+            resolution: entry.resolution,
+            codec_type: entry.codec_type,
+        })
+    }
+    // get work directory string
+    let workdir_str = workdir
+        .to_str()
+        .context("could not convert path to string?")?;
+    // calculate file list based off of work directory and renditions
+    let file_list: String = ret_renditions
+        .iter()
+        .map(|e| format!("{}\\{}", workdir_str, e.filename))
+        .collect::<Vec<String>>()
+        .join(" ");
+    debug!("file list: {}", file_list);
+    // mp4dash --use-segment-timeline --no-split f_*.m* -o export
+    Command::new("mp4dash")
+        .args([
+            "--use-segment-timeline",
+            "--no-split",
+            &file_list,
+            "-o",
+            out_dir
+                .to_str()
+                .context("could not convert path to string?")?,
+        ])
+        .output()?;
+    Ok(ret_renditions)
+}
+
+// not using for now b/c GOP issues
 #[allow(dead_code)]
 async fn extract_av_from_mkv(
     path: PathBuf,
-    output_folder: PathBuf,
+    workdir: PathBuf,
     streams: &[Stream],
 ) -> Result<Vec<TranscodeEntry>, Error> {
     let resolution = streams
@@ -100,9 +170,7 @@ async fn extract_av_from_mkv(
             "0:v:0",
             &format!(
                 "{}/{}p.mp4",
-                output_folder
-                    .to_str()
-                    .context("could not get output folder")?,
+                workdir.to_str().context("could not get output folder")?,
                 resolution
             ),
             "-c",
@@ -111,9 +179,7 @@ async fn extract_av_from_mkv(
             "0:a:0",
             &format!(
                 "{}/{}.m4a",
-                output_folder
-                    .to_str()
-                    .context("could not get output folder")?,
+                workdir.to_str().context("could not get output folder")?,
                 bitrate
             ),
         ])
@@ -146,11 +212,20 @@ struct Resolution {
     codec: String,
 }
 
-async fn transcode_multiple_res(
-    path: PathBuf,
-    output_folder: PathBuf,
+#[derive(Default, Serialize, Deserialize)]
+struct MultiResProgress {
+    fps: f64,
+    bitrate: String,
+    total_size_b: u64,
+    out_time_ms: u64,
+    speed: String,
+    progress: f64,
+}
+fn transcode_multiple_res(
+    path: &PathBuf,
+    workdir: &Path,
     streams: &[Stream],
-    jctx: JobCtx,
+    jctx: &JobCtx,
     state: &State,
 ) -> Result<Vec<TranscodeEntry>, Error> {
     // get first video track
@@ -185,17 +260,24 @@ async fn transcode_multiple_res(
     let mut config_resolutions_height = config_resolutions_avc_height.to_vec();
     config_resolutions_height.extend_from_slice(&config_resolutions_av1_height);
 
+    // prob a better way to do this
     for res in config_resolutions_avc_height {
         // if resolution is less than video resolution
         if Some(res) <= stream.height {
-            resolutions.push(Resolution { height: res, codec: "avc".to_owned() });
+            resolutions.push(Resolution {
+                height: res,
+                codec: "avc".to_owned(),
+            });
         }
     }
 
     for res in config_resolutions_av1_height {
         // if resolution is less than video resolution
         if Some(res) <= stream.height {
-            resolutions.push(Resolution { height: res, codec: "av1".to_owned() });
+            resolutions.push(Resolution {
+                height: res,
+                codec: "av1".to_owned(),
+            });
         }
     }
 
@@ -204,6 +286,41 @@ async fn transcode_multiple_res(
         if *res == *bitrate {
             bitrates.push(res.to_string());
         }
+    }
+
+    // do all the resolutions already exist? if so, return the entries
+    let mut tc = Vec::new();
+    for res in &resolutions {
+        if workdir
+            .join(format!("{}p-{}.mp4", res.height, res.codec))
+            .exists()
+        {
+            // build a tc entry
+            tc.push(TranscodeEntry {
+                filename: format!("{}p-{}.mp4", res.height, res.codec),
+                resolution: res.height,
+                codec_type: CodecType::Video,
+            });
+        }
+    }
+
+    for b in &bitrates {
+        if workdir
+            .join(format!("{}.m4a", b))
+            .exists()
+        {
+            // build a tc entry
+            tc.push(TranscodeEntry {
+                filename: format!("{}.m4a", b),
+                resolution: 0,
+                codec_type: CodecType::Audio,
+            });
+        }
+    }
+
+    // we transcode all at once, so doing this should be okay
+    if !tc.is_empty() {
+        return Ok(tc);
     }
 
     if resolutions.is_empty() {
@@ -221,7 +338,12 @@ async fn transcode_multiple_res(
     }
     filter_complex.push(';');
     for (i, res) in resolutions.iter().enumerate() {
-        filter_complex.push_str(&format!("[v{}]scale=-2:{}[v{}out]", i + 1, res.height, i + 1));
+        filter_complex.push_str(&format!(
+            "[v{}]scale=-2:{}[v{}out]",
+            i + 1,
+            res.height,
+            i + 1
+        ));
         if i < resolutions.len() - 1 {
             filter_complex.push(';');
         }
@@ -246,44 +368,53 @@ async fn transcode_multiple_res(
         frame_rate_fraction.parse::<f64>()?.round()
     };
     let gop_duration_seconds: f64 = 3.0;
+    // calculate GOP
     let gop_size = (fps * gop_duration_seconds).round() as i32;
 
+    // transcode all resolutions
     for (i, res) in resolutions.iter().enumerate() {
         debug!("Building res {} ({})", res.height, res.codec);
-        ff.arg("-map")
-        .arg(format!("[v{}out]", i + 1));
-        match res.codec.as_str() {
-            "av1" => {
-                let settings = TranscodeSettings {
-                    crf: 30,
-                    preset: 5,
-                    ..Default::default()
-                };
-                SvtAv1.transcode(&settings, &mut ff)?;
+        ff.arg("-map").arg(format!("[v{}out]", i + 1));
+        let settings = TranscodeSettings {
+            crf: match res.codec.as_str() {
+                "av1" => 20,
+                "avc" => 16,
+                _ => return Err(anyhow!("unsupported codec")),
             },
-            "avc" => {
-                let settings = TranscodeSettings {
-                    crf: 16,
-                    preset: 8,
-                    ..Default::default()
-                };
-                LibX264.transcode(&settings, &mut ff)?;
+            preset: match res.codec.as_str() {
+                "av1" => 13,
+                "avc" => 5,
+                _ => return Err(anyhow!("unsupported codec")),
             },
-            _ => {
-                anyhow::bail!("unsupported codec");
-            }
-        }
+            encoder_params: match res.codec.as_str() {
+                "av1" => Some("tune=0:enable-overlays=1".to_owned()),
+                "avc" => None,
+                _ => return Err(anyhow!("unsupported codec")),
+            },
+            ..Default::default()
+        };
+        let transcoder: Box<dyn Transcoder> = match res.codec.as_str() {
+            "av1" => Box::new(SvtAv1),
+            "avc" => Box::new(LibX264),
+            _ => return Err(anyhow!("unsupported codec")),
+        };
+        transcoder.transcode(&settings, &mut ff)?;
 
         ff.arg("-an")
-        // force consistent GOPs and I-frames
-        .arg("-g")
-        .arg(gop_size.to_string())
-        .arg("-keyint_min")
-        .arg(gop_size.to_string())
-        // disable scene change detection
-        .arg("-sc_threshold")
-        .arg("0")
-        .arg(format!("{}/{}p-{}.mp4", output_folder.to_string_lossy(), res.height, res.codec));
+            // force consistent GOPs and I-frames
+            .arg("-g")
+            .arg(gop_size.to_string())
+            .arg("-keyint_min")
+            .arg(gop_size.to_string())
+            // disable scene change detection
+            .arg("-sc_threshold")
+            .arg("0")
+            .arg(format!(
+                "{}/{}p-{}.mp4",
+                workdir.to_string_lossy(),
+                res.height,
+                res.codec
+            ));
 
         transc_entries.push(TranscodeEntry {
             filename: format!("{}p-{}.mp4", res.height, res.codec),
@@ -294,13 +425,14 @@ async fn transcode_multiple_res(
 
     dbg!(ff.get_args().collect::<Vec<_>>());
 
+    // add audio
     for &br in config_audio_bitrates.iter() {
         ff.arg("-vn")
             .arg("-c:a")
             .arg("aac")
             .arg("-b:a")
             .arg(br)
-            .arg(format!("{}/{}.m4a", output_folder.to_string_lossy(), br));
+            .arg(format!("{}/{}.m4a", workdir.to_string_lossy(), br));
 
         transc_entries.push(TranscodeEntry {
             filename: format!("{}.m4a", br),
@@ -311,7 +443,7 @@ async fn transcode_multiple_res(
 
     dbg!(&stream.tags);
 
-    // number of frames
+    // get number of frames
     let frames = match stream.tags {
         Some(ref tags) => {
             if let Some(frame) = &tags.number_of_frames_eng {
@@ -341,26 +473,29 @@ async fn transcode_multiple_res(
         .context("Could not get stdout from child ffmpeg")?;
     let reader = BufReader::new(stdout);
 
-    for lines in reader.lines() {
-        if let Some((key, value)) = parse_line(&lines?) {
-            debug!("key: {} - value: {}", key, value);
-            if key == "frame" {
-                let value = value.parse::<i64>().unwrap_or(0);
+    let mut progress = MultiResProgress {
+        fps: 0.0,
+        bitrate: "".to_string(),
+        total_size_b: 0,
+        out_time_ms: 0,
+        speed: 0.to_string(),
+        progress: 0.0,
+    };
 
-                debug!(
-                    "Progress: {} - raw value: {}",
-                    value as f64 / frames as f64,
-                    value
-                );
-                jctx.update(
-                    state,
-                    &json!({
-                        "progress": value as f64/frames as f64,
-                        "frames": value,
-                    }),
-                )?;
-            } else if key == "progress" && value != "continue" {
-                break;
+    for line in reader.lines() {
+        if let Some((key, value)) = parse_line(&line?) {
+            match (key, value) {
+                ("frame", v) => {
+                    progress.progress = v.parse::<i64>().unwrap_or(0) as f64 / frames as f64
+                }
+                ("fps", v) => progress.fps = v.parse().unwrap_or(0.0),
+                ("bitrate", v) => progress.bitrate = v.to_string(),
+                ("out_time_us", v) => progress.out_time_ms = v.parse().unwrap_or(0),
+                ("speed", v) => progress.speed = v.to_string(),
+                ("total_size", v) => progress.total_size_b = v.parse().unwrap_or(0),
+                ("progress", v) if v != "continue" => break,
+                ("progress", _) => jctx.update(state, &json!(progress))?,
+                _ => {}
             }
         }
     }
@@ -369,7 +504,7 @@ async fn transcode_multiple_res(
 
     info!("transcoding complete - status: {:?}", status.code());
 
-    Ok(vec![])
+    Ok(transc_entries)
 }
 
 fn parse_line(line: &str) -> Option<(&str, &str)> {
@@ -395,7 +530,7 @@ struct SubtitleEntry {
 
 async fn extract_ass_from_mkv(
     path: PathBuf,
-    output_folder: PathBuf,
+    workdir: PathBuf,
     streams: &[Stream],
 ) -> Result<Vec<SubtitleEntry>, Error> {
     // filter subs
@@ -408,7 +543,7 @@ async fn extract_ass_from_mkv(
     dbg!(&subs);
 
     if !subs.is_empty() {
-        let _ = tokio::fs::create_dir_all(output_folder.clone()).await;
+        let _ = tokio::fs::create_dir_all(workdir.clone()).await;
     }
 
     for s in subs {
@@ -445,9 +580,7 @@ async fn extract_ass_from_mkv(
                             sub_type,
                             format!(
                                 "{}/{}.{}",
-                                output_folder
-                                    .to_str()
-                                    .context("could not get output folder")?,
+                                workdir.to_str().context("could not get output folder")?,
                                 language,
                                 sub_type
                             )

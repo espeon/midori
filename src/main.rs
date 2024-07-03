@@ -69,7 +69,7 @@ async fn test_transcode(
     Extension(db): Extension<Arc<services::db::Database>>,
 ) -> Result<axum::Json<serde_json::Value>, AppError> {
     let d = unsafe_get_conn(&db).unwrap();
-    let filename = "[SubsPlease] Seiyuu Radio no Uraomote - 12 (1080p) [F45E1BD5].mkv";
+    let filename = "Persona 5 The Animation OP - 01.mkv";
     let path: PathBuf = format!("{}/{}", std::env::var("INPUT_FOLDER")?, filename).into();
     debug!("transcoding {}", path.display());
     let job = jobs::transcode::TranscodeJob::new(path);

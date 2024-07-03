@@ -57,7 +57,7 @@ pub struct Stream {
     duration: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Copy, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum CodecType {
     Attachment,

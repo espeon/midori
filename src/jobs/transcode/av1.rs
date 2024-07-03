@@ -15,6 +15,9 @@ impl Transcoder for SvtAv1 {
           .arg("-preset")
           .arg(self.get_preset(settings.preset))
           .arg("-an");
+        if let Some(svt_av1_params) = settings.encoder_params.as_ref() {
+            ff.arg("-svtav1-params").arg(svt_av1_params);
+        }
         Ok(())
     }
 

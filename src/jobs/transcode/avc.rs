@@ -29,6 +29,10 @@ impl Transcoder for LibX264 {
         // disable scene change detection
         .arg("-sc_threshold")
         .arg("0");
+
+        if let Some(avc_params) = settings.encoder_params.as_ref() {
+            ff.arg("-x264-params").arg(avc_params);
+        }
         Ok(())
     }
     fn get_preset(&self, preset: u8) -> String {

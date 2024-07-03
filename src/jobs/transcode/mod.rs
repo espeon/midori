@@ -38,6 +38,8 @@ impl Default for TranscodeSettings {
 
 /// Generate transcode settings for ffmpeg
 pub trait Transcoder {
+    /// Modifies a ffmpeg command for transcoding to the given settings
     fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()>;
+    /// Convert preset number to encoder-specific preset
     fn get_preset(&self, preset: u8) -> String;
 }
