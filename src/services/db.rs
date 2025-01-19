@@ -4,16 +4,17 @@ use axum::async_trait;
 use rusqlite::{types::FromSql, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::task;
 use std::cell::UnsafeCell;
-use std::sync::Arc;
-use std::{fs, thread};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 use thread_local::ThreadLocal;
+use tokio::sync::Mutex;
+use tokio::task;
 
 use anyhow::{anyhow, bail, Result};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use super::job::{Job, JobCtx, Schedulable, State};
 
@@ -36,15 +37,15 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn new() -> Result<Arc<Self>> {
+    pub fn new() -> Result<Arc<Mutex<Self>>> {
         debug!("detected sqlite library version: {}", rusqlite::version());
         info!("connecting to database...");
         let path = PathBuf::from(DB_FILE_NAME);
 
-        Ok(Arc::new(Self {
+        Ok(Arc::new(Mutex::new(Self {
             connections: ThreadLocal::new(),
             path,
-        }))
+        })))
     }
 
     pub fn acquire_conn(&self) -> Result<&UnsafeCell<Connection>> {
@@ -148,7 +149,6 @@ impl QueryMode for Tx {
     }
 }
 
-
 #[instrument(skip(db, query), err)]
 fn query_inner<M, F, T>(db: &Database, mut query: F) -> Result<T>
 where
@@ -183,11 +183,11 @@ where
                     }
 
                     break Err(err);
-                },
+                }
             }
         };
 
-        debug!("transaction took {:?}", start.elapsed());
+        trace!("transaction took {:?}", start.elapsed());
         ret
     })
 }
@@ -208,18 +208,25 @@ where
     query_inner::<Tx, _, _>(db, query)
 }
 
+/* Database Analysis (Scheduled Job) */
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct DatabaseAnalyzeJob;
 
 #[async_trait]
 #[typetag::serde]
 impl Job for DatabaseAnalyzeJob {
-    async fn run(&self, state: &State, jctx:JobCtx) -> Result<serde_json::Value> {
-        jctx.update(state, &json!({
-            "state": "analyzing",
-            "progress": 0
-        }))?;
-        query(&state.db, |conn| {
+    async fn run(&self, state: &State, jctx: JobCtx) -> Result<serde_json::Value> {
+        jctx.update(
+            state,
+            &json!({
+                "state": "analyzing",
+                "progress": 0
+            }),
+        )?;
+        debug!("analyzing database...");
+        let db = state.db.lock().await;
+        query(&db, |conn| {
             conn.execute_batch(
                 r#"
                 PRAGMA analysis_limit=400;
@@ -230,10 +237,13 @@ impl Job for DatabaseAnalyzeJob {
             Ok(())
         })?;
 
-        jctx.update(state, &json!({
-            "state": "analyzed",
-            "progress": 100
-        }))?;
+        jctx.update(
+            state,
+            &json!({
+                "state": "analyzed",
+                "progress": 100
+            }),
+        )?;
         debug!("database analyzed - job id {}", jctx.id);
 
         Ok(json!({}))

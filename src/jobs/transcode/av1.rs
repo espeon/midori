@@ -6,15 +6,15 @@ pub struct SvtAv1;
 
 impl Transcoder for SvtAv1 {
     fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()> {
-        
-        ff
-          .arg("-c:v")
-          .arg("libsvtav1")
-          .arg("-crf")
-          .arg(settings.crf.to_string())
-          .arg("-preset")
-          .arg(self.get_preset(settings.preset))
-          .arg("-an");
+        ff.arg("-c:v")
+            .arg("libsvtav1")
+            .arg("-crf")
+            .arg(settings.crf.to_string())
+            .arg("-preset")
+            .arg(self.get_preset(settings.preset))
+            .arg("-sharpness")
+            .arg("3")
+            .arg("-an");
         if let Some(svt_av1_params) = settings.encoder_params.as_ref() {
             ff.arg("-svtav1-params").arg(svt_av1_params);
         }
@@ -31,19 +31,18 @@ pub struct Av1Nvenc;
 
 impl Transcoder for Av1Nvenc {
     fn transcode(&self, settings: &TranscodeSettings, ff: &mut Command) -> anyhow::Result<()> {
-        ff
-          .arg("-c:v")
-          .arg("av1_nvenc")
-          .arg("-preset")
-          .arg(self.get_preset(settings.preset))
-          .arg("-tune")
-          .arg("hq")
-          .arg("-an");
+        ff.arg("-c:v")
+            .arg("av1_nvenc")
+            .arg("-preset")
+            .arg(self.get_preset(settings.preset))
+            .arg("-tune")
+            .arg("hq")
+            .arg("-an");
         Ok(())
     }
 
     fn get_preset(&self, preset: u8) -> String {
-        match preset { 
+        match preset {
             1..=2 => "p1",
             3..=5 => "p2",
             6..=7 => "p3",
@@ -52,6 +51,7 @@ impl Transcoder for Av1Nvenc {
             12..=13 => "p6",
             14..=16 => "p7",
             _ => "default",
-        }.to_string()
+        }
+        .to_string()
     }
 }

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod filesystem;
 pub mod queue_torrent;
 pub mod transcode;
-
 
 /// Output when running ffprobe -v error -print_format json -show_streams <video>.mkv
 #[derive(Serialize, Deserialize)]
@@ -68,19 +68,26 @@ pub enum CodecType {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Tags {
-    #[serde(rename = "BPS-eng")]
+    #[serde(rename = "BPS", alias = "BPS-eng")]
     bps_eng: Option<String>,
-    #[serde(rename = "DURATION-eng")]
+    #[serde(rename = "DURATION", alias = "DURATION-eng")]
     duration_eng: Option<String>,
-    #[serde(rename = "NUMBER_OF_FRAMES-eng")]
+    #[serde(rename = "NUMBER_OF_FRAMES", alias = "NUMBER_OF_FRAMES-eng")]
     number_of_frames_eng: Option<String>,
-    #[serde(rename = "NUMBER_OF_BYTES-eng")]
+    // both NUMBER_OF_BYTES and NUMBER_OF_BYTES-ENG
+    #[serde(rename = "NUMBER_OF_BYTES", alias = "NUMBER_OF_BYTES-eng")]
     number_of_bytes_eng: Option<String>,
-    #[serde(rename = "_STATISTICS_WRITING_APP-eng")]
+    #[serde(
+        rename = "_STATISTICS_WRITING_APP",
+        alias = "_STATISTICS_WRITING_APP-eng"
+    )]
     statistics_writing_app_eng: Option<String>,
-    #[serde(rename = "_STATISTICS_WRITING_DATE_UTC-eng")]
+    #[serde(
+        rename = "_STATISTICS_WRITING_DATE_UTC",
+        alias = "_STATISTICS_WRITING_DATE_UTC-eng"
+    )]
     statistics_writing_date_utc_eng: Option<String>,
-    #[serde(rename = "_STATISTICS_TAGS-eng")]
+    #[serde(rename = "_STATISTICS_TAGS", alias = "_STATISTICS_TAGS-eng")]
     statistics_tags_eng: Option<String>,
     language: Option<String>,
     title: Option<String>,

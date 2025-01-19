@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Error};
 use axum::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     jobs::{
@@ -56,16 +56,24 @@ impl Job for TranscodeJob {
         let subs = extract_ass_from_mkv(self.path.clone(), workdir.join("sub"), &streams).await?;
         //let mut av = extract_av_from_mkv(self.path.clone(), workdir.clone(), &streams).await?;
         let res = transcode_multiple_res(&self.path, &workdir, &streams, &jctx, state)?;
-        let renditions = res; //av.append(&mut res);
+        // does res match the one that we literally just generated?
+        debug!("res!!!: {:?}", res);
 
-        // get out dir
+        // check that out dir _doesn't_ exist
+        let out_dir = PathBuf::from(format!("out/{}", jctx.id));
+        if tokio::fs::metadata(out_dir.clone()).await.is_ok() {
+            warn!("out dir already exists, deleting...");
+            tokio::fs::remove_dir_all(out_dir.clone()).await?;
+        }
+
         let out_dir = PathBuf::from(format!("out/{}", jctx.id));
 
         let _ = tokio::fs::create_dir_all(out_dir.clone()).await;
         debug!("Segmenting {}", workdir.to_str().unwrap());
-        let _ = fragment_and_segment(workdir, out_dir, &renditions)?;
+        dbg!(&res);
+        let _ = fragment_and_segment(workdir, out_dir, &res)?;
 
-        Ok(json!({"subtitles": subs, "renditions": renditions}))
+        Ok(json!({"subtitles": subs, "renditions": res}))
     }
 }
 
@@ -79,7 +87,7 @@ fn fragment_and_segment(
     for entry in renditions {
         // mp4fragment "$file" "f_$file"
         debug!(
-            "fragmenting {}\\{}",
+            "fragmenting {}/{}",
             workdir
                 .to_str()
                 .context("could not convert path to string?")?,
@@ -87,14 +95,14 @@ fn fragment_and_segment(
         );
         Command::new("mp4fragment")
             .arg(format!(
-                "{}\\{}",
+                "{}/{}",
                 workdir
                     .to_str()
                     .context("could not convert path to string?")?,
                 entry.filename
             ))
             .arg(format!(
-                "{}\\f_{}",
+                "{}/f_{}",
                 workdir.to_str().unwrap(),
                 entry.filename
             ))
@@ -112,20 +120,29 @@ fn fragment_and_segment(
     // calculate file list based off of work directory and renditions
     let file_list: String = ret_renditions
         .iter()
-        .map(|e| format!("{}\\{}", workdir_str, e.filename))
+        .map(|e| format!("{}/{}", workdir_str, e.filename))
         .collect::<Vec<String>>()
         .join(" ");
     debug!("file list: {}", file_list);
+    let out_dir_str = out_dir
+        .to_str()
+        .context("could not convert path to string?")?;
     // mp4dash --use-segment-timeline --no-split f_*.m* -o export
+    debug!(
+        "mp4dash command: mp4dash --use-segment-timeline --no-split {} -o {}",
+        file_list, out_dir_str
+    );
     Command::new("mp4dash")
         .args([
+            "--hls",
+            "--force",
             "--use-segment-timeline",
             "--no-split",
+            "--rename-media",
+            "--hls-master-playlist-name=main.m3u8",
             &file_list,
             "-o",
-            out_dir
-                .to_str()
-                .context("could not convert path to string?")?,
+            out_dir_str,
         ])
         .output()?;
     Ok(ret_renditions)
@@ -250,9 +267,10 @@ fn transcode_multiple_res(
         .context("could not parse audio bitrate")?;
     let bitrate = (bitrate_int / 1000).to_string() + "k";
     // arr of res heights
-    let config_resolutions_avc_height = [720, 360];
+    // avc has difficulties with web streaming right now
+    let config_resolutions_avc_height = []; //720, 360];
     let config_resolutions_av1_height = [2160, 1440, 1080, 720, 480];
-    let config_audio_bitrates = ["128k", "64k"];
+    let config_audio_bitrates = ["128k"];
     let mut resolutions: Vec<Resolution> = Vec::new();
     let mut bitrates: Vec<String> = Vec::new();
 
@@ -305,10 +323,7 @@ fn transcode_multiple_res(
     }
 
     for b in &bitrates {
-        if workdir
-            .join(format!("{}.m4a", b))
-            .exists()
-        {
+        if workdir.join(format!("{}.m4a", b)).exists() {
             // build a tc entry
             tc.push(TranscodeEntry {
                 filename: format!("{}.m4a", b),
@@ -324,9 +339,7 @@ fn transcode_multiple_res(
     }
 
     if resolutions.is_empty() {
-        // not returning an error here in the case of the source video
-        // actually being less than lowest transcoded resolution
-        return Ok(vec![]);
+        return Err(anyhow!("Video smaller than lowest transcoded resolution"));
     }
     // build ffmpeg command
     let mut ff = Command::new("ffmpeg");
@@ -377,17 +390,19 @@ fn transcode_multiple_res(
         ff.arg("-map").arg(format!("[v{}out]", i + 1));
         let settings = TranscodeSettings {
             crf: match res.codec.as_str() {
-                "av1" => 20,
-                "avc" => 16,
+                "av1" => 32,
+                "avc" => 24,
                 _ => return Err(anyhow!("unsupported codec")),
             },
             preset: match res.codec.as_str() {
-                "av1" => 13,
+                "av1" => 6,
                 "avc" => 5,
                 _ => return Err(anyhow!("unsupported codec")),
             },
             encoder_params: match res.codec.as_str() {
-                "av1" => Some("tune=0:enable-overlays=1".to_owned()),
+                "av1" => Some(
+                    "tune=2:enable-overlays=1:film-grain=8:adaptive-film-grain=1:lp=2".to_owned(),
+                ),
                 "avc" => None,
                 _ => return Err(anyhow!("unsupported codec")),
             },
@@ -406,6 +421,8 @@ fn transcode_multiple_res(
             .arg(gop_size.to_string())
             .arg("-keyint_min")
             .arg(gop_size.to_string())
+            .arg("-pix_fmt")
+            .arg("yuv420p10le")
             // disable scene change detection
             .arg("-sc_threshold")
             .arg("0")
@@ -443,15 +460,12 @@ fn transcode_multiple_res(
 
     dbg!(&stream.tags);
 
+    dbg!(&transc_entries);
     // get number of frames
     let frames = match stream.tags {
         Some(ref tags) => {
             if let Some(frame) = &tags.number_of_frames_eng {
-                if let Ok(v) = frame.parse::<i64>() {
-                    v
-                } else {
-                    0
-                }
+                frame.parse::<i64>().unwrap_or_default()
             } else {
                 0
             }
@@ -503,6 +517,8 @@ fn transcode_multiple_res(
     let status = ffe.wait()?;
 
     info!("transcoding complete - status: {:?}", status.code());
+
+    debug!("Returning entries: {:?}", transc_entries);
 
     Ok(transc_entries)
 }
